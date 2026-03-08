@@ -1,0 +1,217 @@
+bot.py
+import discord
+from discord.ext import commands
+import random
+import json
+import os
+
+import os
+TOKEN = os.getenv("TOKEN")
+
+VOICE_4V4_ID = 1480247988365426698
+VOICE_3V3_ID = 1480309883453571183
+CATEGORY_ID = 1480302926491811931
+RESULT_CHANNEL_ID = 1480256624215064576
+
+intents = discord.Intents.all()
+bot = commands.Bot(command_prefix="!", intents=intents)
+
+game_counter = 0
+
+ELO_FILE = "elo.json"
+
+if not os.path.exists(ELO_FILE):
+    with open(ELO_FILE, "w") as f:
+        json.dump({}, f)
+
+def load_elo():
+    with open(ELO_FILE) as f:
+        return json.load(f)
+
+def save_elo(data):
+    with open(ELO_FILE, "w") as f:
+        json.dump(data, f, indent=4)
+
+def get_elo(user_id):
+    data = load_elo()
+    if str(user_id) not in data:
+        data[str(user_id)] = 1000
+        save_elo(data)
+    return data[str(user_id)]
+
+def add_elo(user_id, amount):
+    data = load_elo()
+    data[str(user_id)] = data.get(str(user_id), 1000) + amount
+    save_elo(data)
+
+class WinnerView(discord.ui.View):
+
+    def __init__(self, red_team, blue_team, red_voice, blue_voice, text_channel):
+        super().__init__(timeout=None)
+        self.red_team = red_team
+        self.blue_team = blue_team
+        self.red_voice = red_voice
+        self.blue_voice = blue_voice
+        self.text_channel = text_channel
+
+    async def finish(self, interaction, winner):
+
+        if not interaction.user.guild_permissions.manage_channels:
+            await interaction.response.send_message(
+                "❌ Apenas staff pode usar isso.", ephemeral=True
+            )
+            return
+
+        guild = interaction.guild
+        result_channel = guild.get_channel(RESULT_CHANNEL_ID)
+
+        if winner == "red":
+            winners = self.red_team
+            losers = self.blue_team
+            win_name = "Time Vermelho"
+        else:
+            winners = self.blue_team
+            losers = self.red_team
+            win_name = "Time Azul"
+
+        embed = discord.Embed(
+            title="Resultado da Partida",
+            description=f"🏆 **{win_name} venceu!**",
+            color=discord.Color.green()
+        )
+
+        win_text = ""
+        lose_text = ""
+
+        for p in winners:
+            add_elo(p.id, 25)
+            win_text += f"{p.mention} +25 ELO\n"
+
+        for p in losers:
+            add_elo(p.id, -15)
+            lose_text += f"{p.mention} -15 ELO\n"
+
+        embed.add_field(name="🏆 Vencedores", value=win_text, inline=False)
+        embed.add_field(name="💀 Perdedores", value=lose_text, inline=False)
+
+        await result_channel.send(embed=embed)
+
+        await self.red_voice.delete()
+        await self.blue_voice.delete()
+        await self.text_channel.delete()
+
+        await interaction.response.send_message("Resultado registrado.", ephemeral=True)
+
+    @discord.ui.button(label="Time Vermelho venceu", style=discord.ButtonStyle.red)
+    async def red_win(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self.finish(interaction, "red")
+
+    @discord.ui.button(label="Time Azul venceu", style=discord.ButtonStyle.blurple)
+    async def blue_win(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self.finish(interaction, "blue")
+
+
+async def start_match(guild, members):
+
+    global game_counter
+
+    game_counter += 1
+
+    category = guild.get_channel(CATEGORY_ID)
+
+    random.shuffle(members)
+
+    half = len(members) // 2
+
+    red_team = members[:half]
+    blue_team = members[half:]
+
+    red_voice = await guild.create_voice_channel(
+        f"🔴 Time Vermelho {game_counter}", category=category
+    )
+
+    blue_voice = await guild.create_voice_channel(
+        f"🔵 Time Azul {game_counter}", category=category
+    )
+
+    text_channel = await guild.create_text_channel(
+        f"jogo-{game_counter}", category=category
+    )
+
+    for p in red_team:
+        await p.move_to(red_voice)
+
+    for p in blue_team:
+        await p.move_to(blue_voice)
+
+    embed = discord.Embed(
+        title=f"Jogo {game_counter}",
+        description="Clique no botão quando a partida terminar",
+        color=discord.Color.orange()
+    )
+
+    view = WinnerView(red_team, blue_team, red_voice, blue_voice, text_channel)
+
+    await text_channel.send(embed=embed, view=view)
+
+
+@bot.event
+async def on_voice_state_update(member, before, after):
+
+    if after.channel:
+
+        channel = after.channel
+        members = [m for m in channel.members if not m.bot]
+
+        if channel.id == VOICE_4V4_ID and len(members) == 8:
+            await start_match(member.guild, members)
+
+        if channel.id == VOICE_3V3_ID and len(members) == 6:
+            await start_match(member.guild, members)
+
+
+@bot.command()
+async def perfil(ctx, membro: discord.Member = None):
+
+    if membro is None:
+        membro = ctx.author
+
+    elo = get_elo(membro.id)
+
+    embed = discord.Embed(
+        title=f"Perfil de {membro.name}",
+        color=discord.Color.blue()
+    )
+
+    embed.add_field(name="ELO", value=elo)
+
+    await ctx.send(embed=embed)
+
+
+@bot.command()
+async def rank(ctx):
+
+    data = load_elo()
+
+    ranking = sorted(data.items(), key=lambda x: x[1], reverse=True)[:10]
+
+    embed = discord.Embed(
+        title="🏆 Ranking de ELO",
+        color=discord.Color.gold()
+    )
+
+    text = ""
+
+    pos = 1
+
+    for user_id, elo in ranking:
+        user = await bot.fetch_user(int(user_id))
+        text += f"**{pos}. {user.name}** - {elo} ELO\n"
+        pos += 1
+
+    embed.description = text
+
+    await ctx.send(embed=embed)
+
+
+bot.run(TOKEN)
